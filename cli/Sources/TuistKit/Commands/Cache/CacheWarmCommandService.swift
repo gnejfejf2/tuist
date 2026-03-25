@@ -94,7 +94,8 @@ import XcodeGraph
             configuration: String?,
             targetsToBinaryCache: Set<String>,
             externalOnly: Bool,
-            generateOnly: Bool
+            generateOnly: Bool,
+            cacheProfile: String?
         ) async throws {
             let path = if let directory {
                 try AbsolutePath(validating: directory, relativeTo: fileHandler.currentPath)
@@ -123,6 +124,14 @@ import XcodeGraph
             // Lint
             try cacheWarmGraphLinter.lint(graph: graph)
 
+            // Resolve cache profile exclusions (only when --cache-profile is explicitly specified)
+            let resolvedCacheProfile = cacheProfile.map { CacheProfileType(stringLiteral: $0) }
+            let profileExcludedTargets = Self.resolveProfileExcludedTargets(
+                cacheProfile: resolvedCacheProfile,
+                config: config,
+                allTargets: GraphTraverser(graph: graph).allTargets()
+            )
+
             // Hash
             Logger.current.info("Hashing cacheable targets")
 
@@ -132,6 +141,7 @@ import XcodeGraph
                 config: config,
                 includedTargets: targetsToBinaryCache,
                 externalOnly: externalOnly,
+                excludedTargets: profileExcludedTargets,
                 cacheStorage: cacheStorage
             )
 
@@ -818,12 +828,67 @@ import XcodeGraph
             return try await cacheStorage.store(storableTargets, cacheCategory: .binaries)
         }
 
+        private static func resolveProfileExcludedTargets(
+            cacheProfile: CacheProfileType?,
+            config: Tuist,
+            allTargets: Set<GraphTarget>
+        ) -> Set<String> {
+            guard let cacheProfile else { return [] }
+
+            let profiles = config.project.generatedProject?.cacheOptions.profiles
+
+            let profile: CacheProfile
+            switch cacheProfile {
+            case .onlyExternal:
+                profile = .onlyExternal
+            case .allPossible:
+                profile = .allPossible
+            case .none:
+                profile = .none
+            case let .custom(name):
+                guard let custom = profiles?.profileByName[name] else {
+                    Logger.current.warning("Cache profile '\(name)' not found, skipping profile exclusions")
+                    return []
+                }
+                profile = custom
+            }
+
+            guard !profile.exceptTargetQueries.isEmpty else { return [] }
+
+            var excluded = Set<String>()
+            var excludedTags = Set<String>()
+
+            for query in profile.exceptTargetQueries {
+                switch query {
+                case let .named(name):
+                    excluded.insert(name)
+                case let .tagged(tag):
+                    excludedTags.insert(tag)
+                }
+            }
+
+            if !excludedTags.isEmpty {
+                for target in allTargets {
+                    if !target.target.metadata.tags.isDisjoint(with: excludedTags) {
+                        excluded.insert(target.target.name)
+                    }
+                }
+            }
+
+            if !excluded.isEmpty {
+                Logger.current.info("Excluding targets from cache profile: \(excluded.sorted().joined(separator: ", "))")
+            }
+
+            return excluded
+        }
+
         private func cacheableTargets(
             for graph: Graph,
             configuration: String,
             config: Tuist,
             includedTargets: Set<String>,
             externalOnly: Bool,
+            excludedTargets: Set<String>,
             cacheStorage: CacheStoring
         ) async throws -> [(GraphTarget, String)] {
             let graphTraverser = GraphTraverser(graph: graph)
@@ -831,7 +896,8 @@ import XcodeGraph
                 .isEmpty ? Set(graphTraverser.allInternalTargets().map(\.target.name)) : includedTargets
 
             // When `externalOnly` is true, there is no need to compute `includedTargets` hashes
-            let excludedTargets = externalOnly ? includedTargets : []
+            // Also exclude any explicitly excluded targets
+            let excludedTargets = (externalOnly ? includedTargets : []).union(excludedTargets)
             let hashesByCacheableTarget = try await cacheGraphContentHasher.contentHashes(
                 for: graph,
                 configuration: configuration,

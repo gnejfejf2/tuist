@@ -2,6 +2,7 @@
     import ArgumentParser
     import Foundation
     import TuistAlert
+    import TuistConfig
     import TuistEnvKey
     import TuistExtension
     import TuistSupport
@@ -55,6 +56,12 @@
         )
         var generateOnly: Bool = false
 
+        @Option(
+            name: .long,
+            help: "Cache profile to use for warming: \(BaseCacheProfile.allCases.map(\.rawValue).joined(separator: ", ")), or a custom profile name. When specified, targets listed in exceptTargetQueries of that profile will be excluded from caching."
+        )
+        var cacheProfile: String?
+
         @Flag(
             name: .long,
             help: "When passed, the hashes of the cacheable frameworks in the given project are printed.",
@@ -77,7 +84,8 @@
                 configuration: configuration,
                 targetsToBinaryCache: Set(targets),
                 externalOnly: externalOnly,
-                generateOnly: generateOnly
+                generateOnly: generateOnly,
+                cacheProfile: cacheProfile
             )
         }
     }
